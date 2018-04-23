@@ -41,6 +41,8 @@ public class SimpleDynamoProvider extends ContentProvider {
     private boolean query_started=false;
     private String my_node_no;
     private NodeInfo my_node_info;
+    private Object rw_mutex = new Object();
+    private boolean rw_status = false;
 
 // Array list and maps
     private String[] node_numbers={"5554","5556","5558","5560","5562"};
@@ -59,7 +61,6 @@ public class SimpleDynamoProvider extends ContentProvider {
     static final String all_node_queryall="*"; // Identifier used to query the entire dht
     static final String newline_delimiter="`nl`";  // Delimiter to separate newline
     static final String other_seperator ="`as`"; // Delimiter to separate all values returned by a node when asked for key *
-    static final String request_join="Node-Join"; // Node join message identifier
     static final String key_search="Data-Search"; // Data search message identifier
     static final String key_insert="Data-Insert"; // Key insert message identifier
     static final String key_result="Search-Result"; // identifier to tell node about the result it has queried
@@ -183,7 +184,13 @@ public class SimpleDynamoProvider extends ContentProvider {
         try {
             NodeInfo node = find_key_location(selection);
             if (node.getSuc_2().equals(my_node_no)) {
-                value = query_my_node(selection);
+                loop_until_rw_status_false(); // looping until the state is false
+                rw_status=true; // changing status so no one else can access
+                synchronized (rw_mutex) {
+                    value = query_my_node(selection);
+                    rw_status = false; // changing status so others can access
+                    rw_mutex.notify();
+                }
                 mc.newRow().add("key", selection).add("value", value.trim());
             } else {
                 String forward_search_msg = key_search + delimiter + selection + delimiter + my_node_no;
@@ -250,6 +257,17 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
         return value;
     }
+    private void loop_until_rw_status_false(){
+	    synchronized (rw_mutex) {
+            while (rw_status) {
+                try {
+                    rw_mutex.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
 	private void process_insert(String key, String value){
         try{
             NodeInfo node = find_key_location(key);
@@ -261,8 +279,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
                 suc_1=node.getSuc_1();
                 suc_2=node.getSuc_2();
-                send_insert_msg(forward_msg,suc_1);
-                send_insert_msg(forward_msg,suc_2);
+                loop_until_rw_status_false();
+                rw_status=true;
+                synchronized (rw_mutex) {
+                    send_insert_msg(forward_msg, suc_1);
+                    send_insert_msg(forward_msg, suc_2);
+                    rw_status = false;
+                    rw_mutex.notify();
+                }
             }
             else{ // If it doesn't belong to me, send it to the guy to whom it belongs
                 String forward_msg = key_insert+delimiter+key+delimiter+value;
@@ -344,11 +368,9 @@ public class SimpleDynamoProvider extends ContentProvider {
         try{
             key_hash=genHash(key);
             node_id_hash=ring_list.get(0);
-            Log.v("Finding key","Started");
             if(key_hash.compareTo(node_id_hash)<=0 || key_hash.compareTo(ring_list.get(ring_list.size()-1))>0){ // If key is greater than everyone or smaller than everyone
                 node_no=id_no_map.get(node_id_hash);
                 node=find_node_by_node_no(node_no);
-                Log.v("Finding key","First node");
                 return node;
             }
             else{
@@ -371,7 +393,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 	    NodeInfo temp_node=null;
 	    for(NodeInfo node : nodes ){
 	        if(node.getMy_no().equals(node_no)) {
-                Log.v("Key location ",node.getMy_no());
                 return node;
             }
         }
@@ -519,18 +540,31 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
         public void send_my_answer(String key,String to_port){
-            String value = query_my_node(key);
-            String qu_res_msg = key_result+delimiter+key+delimiter+value;
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,qu_res_msg,to_port);
+            loop_until_rw_status_false();
+            rw_status=true;
+            synchronized (rw_mutex) {
+                String value = query_my_node(key);
+                rw_status = false;
+                rw_mutex.notify();
+                String qu_res_msg = key_result+delimiter+key+delimiter+value;
+                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,qu_res_msg,to_port);
+            }
+
         }
         private void process_srvr_insert(String key, String value,boolean isRep){
-            insert_in_my_node(key,value);
-            if(!isRep){
-                String my_suc1=my_node_info.getSuc_1();
-                String my_suc2=my_node_info.getSuc_2();
-                String forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
-                send_insert_msg(forward_msg,my_suc1);
-                send_insert_msg(forward_msg,my_suc2);
+            loop_until_rw_status_false();
+            rw_status=true;
+            synchronized (rw_mutex) {
+                insert_in_my_node(key, value);
+                if (!isRep) {
+                    String my_suc1 = my_node_info.getSuc_1();
+                    String my_suc2 = my_node_info.getSuc_2();
+                    String forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
+                    send_insert_msg(forward_msg, my_suc1);
+                    send_insert_msg(forward_msg, my_suc2);
+                }
+                rw_status = false;
+                rw_mutex.notify();
             }
         }
 
