@@ -6,12 +6,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
-import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -29,22 +27,19 @@ import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
 import android.util.Log;
 
-import org.apache.http.conn.ConnectTimeoutException;
-import org.w3c.dom.Node;
-
 import static android.content.ContentValues.TAG;
 
 public class SimpleDynamoProvider extends ContentProvider {
     static final int SERVER_PORT = 10000;
-    private final int timeout=500;
+    private final int timeout=1000;
     private String server_reply="Done";
     private boolean query_started=false;
     private String my_node_no;
     private NodeInfo my_node_info;
     private Object rw_mutex = new Object();
     private boolean rw_status = false;
-
-// Array list and maps
+    private boolean pre_node_sts = true;
+    // Array list and maps
     private String[] node_numbers={"5554","5556","5558","5560","5562"};
     private ArrayList<String> ring_list = new ArrayList<String>();
     private ArrayList<NodeInfo> nodes = new ArrayList<NodeInfo>();
@@ -52,9 +47,11 @@ public class SimpleDynamoProvider extends ContentProvider {
     private ArrayList<String> my_keys = new ArrayList<String>();
     private ArrayList<String> global_keys=new ArrayList<String>();
     private HashMap<String,String> global_values =new HashMap<String, String>();
+    private HashMap<String,Boolean> nodes_status = new HashMap<String, Boolean>();
+    private ArrayList<String> node_start_recv_lst = new ArrayList<String>();
 // Array list and maps till here
 
-//    Identifiers
+    //    Identifiers
     static final int port_mul_factor=2; // multiplication factor to get port number from emulator number
     static final String delimiter="`vh`"; // Delimiter string to separate and identify messages
     static final String curr_node_queryall="@"; // Identifier used to query all the keys stored in the current node
@@ -67,13 +64,14 @@ public class SimpleDynamoProvider extends ContentProvider {
     private final String replica_identifier="`Replica`";
     static final String add_key="Add-Key"; // Identifier to tell node to add this key into its hash table (Content provider) used when a new node joins
     static final String del_key="Del-Key"; // Identifier to tell node to delete key
+    static final String ping_msg="ALIVE"; // Identifier to tell node that alive status has been sent
 // Identifiers till here
 
 
 
-	@Override
-	public int delete(Uri uri, String selection, String[] selectionArgs) {
-		// TODO Auto-generated method stub
+    @Override
+    public int delete(Uri uri, String selection, String[] selectionArgs) {
+        // TODO Auto-generated method stub
         if(selection.equals(curr_node_queryall)){
             delete_my_keys();
             my_keys.clear();
@@ -86,48 +84,53 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
         else
             process_delete_key(selection,my_node_no);
-		return 0;
-	}
+        return 0;
+    }
 
-	@Override
-	public String getType(Uri uri) {
-		// TODO Auto-generated method stub
-		return null;
-	}
+    @Override
+    public String getType(Uri uri) {
+        // TODO Auto-generated method stub
+        return null;
+    }
 
-	@Override
-	public Uri insert(Uri uri, ContentValues values) {
-		// TODO Auto-generated method stub
+    @Override
+    public Uri insert(Uri uri, ContentValues values) {
+        // TODO Auto-generated method stub
         String key = values.get("key").toString();
         String value = values.get("value").toString();
         Log.v("Key to insert",key);
         Log.v("Value of the given key",value);
         process_insert(key,value);
-		return null;
-	}
+        return null;
+    }
 
-	@Override
-	public boolean onCreate() {
-		// TODO Auto-generated method stub
+    @Override
+    public boolean onCreate() {
+        // TODO Auto-generated method stub
         set_my_node_no();
-		create_ring_structure();
-		return false;
-	}
+        create_ring_structure();
+        update_alive_status();
+        return false;
+    }
 
-	@Override
-	public Cursor query(Uri uri, String[] projection, String selection,
-			String[] selectionArgs, String sortOrder) {
-		// TODO Auto-generated method stub
+    @Override
+    public Cursor query(Uri uri, String[] projection, String selection,
+                        String[] selectionArgs, String sortOrder) {
+        // TODO Auto-generated method stub
         MatrixCursor mc = process_query(selection);
-		return mc;
-	}
+        return mc;
+    }
 
-	@Override
-	public int update(Uri uri, ContentValues values, String selection,
-			String[] selectionArgs) {
-		// TODO Auto-generated method stub
-		return 0;
-	}
+    @Override
+    public int update(Uri uri, ContentValues values, String selection,
+                      String[] selectionArgs) {
+        // TODO Auto-generated method stub
+        return 0;
+    }
+    public void update_alive_status(){
+        String alive_sts_msg=ping_msg+delimiter+my_node_no;
+        new Update_live_status_task().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,alive_sts_msg);
+    }
     public void delete_key_in_my_node(String key){
         try {
             getContext().deleteFile(key);
@@ -136,9 +139,9 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
     }
     public void process_delete_key(String key,String from_port){
-	    NodeInfo node = find_key_location(key);
-	    if(node.getMy_no().equals(my_node_no)){
-	        delete_key_in_my_node(key);
+        NodeInfo node = find_key_location(key);
+        if(node.getMy_no().equals(my_node_no)){
+            delete_key_in_my_node(key);
             String forward_delete_msg=del_key+delimiter+key+delimiter+from_port+delimiter+replica_identifier;
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,forward_delete_msg,my_node_info.getSuc_1());
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,forward_delete_msg,my_node_info.getSuc_2());
@@ -153,10 +156,10 @@ public class SimpleDynamoProvider extends ContentProvider {
         for(String key : my_keys)
             delete_key_in_my_node(key);
     }
-	private MatrixCursor process_query(String key){
+    private MatrixCursor process_query(String key){
         String[] column_names ={"key","value"};
         MatrixCursor mc = new MatrixCursor(column_names);
-	    try{
+        try{
             if(key.equals(curr_node_queryall)){
                 Log.v("Query","Querying "+key);
                 String value="";
@@ -173,7 +176,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 mc = query_other_nodes(key);
             }
         }catch(Exception e){
-	        e.printStackTrace();
+            e.printStackTrace();
         }
         return mc;
     }
@@ -195,7 +198,12 @@ public class SimpleDynamoProvider extends ContentProvider {
             } else {
                 String forward_search_msg = key_search + delimiter + selection + delimiter + my_node_no;
                 query_started = true;
-                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_2());
+                boolean status = send_msg_to_client(forward_search_msg,node.getSuc_2());
+                if(!status){
+                    Log.e("Node failure (Read)",node.getSuc_2());
+                    send_msg_to_client(forward_search_msg,node.getSuc_1());
+                }
+//                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_2());
                 synchronized (global_keys) {
                     while (query_started) {
                         global_keys.wait();
@@ -223,15 +231,21 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
             String forward_search_msg = key_search + delimiter + selection+delimiter+my_node_no;
             query_started=true;
-            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,forward_search_msg,my_node_info.getSuc_1());
-            synchronized (global_keys){
-                while(query_started){
+            synchronized (global_keys) {
+                for(String toPort : node_numbers){
+                    if(!toPort.equals(my_node_no)){
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,forward_search_msg,toPort);
+                    }
+                }
+                while (query_started) {
                     global_keys.wait();
                 }
-                for(String key : global_keys){
+                for (String key : global_keys) {
                     value = global_values.get(key);
                     mc.newRow().add("key", key).add("value", value.trim());
+
                 }
+                Log.v("Global Keys *:",mc.toString());
                 global_keys.clear();// resetting global_keys
             }
         }catch(Exception e){
@@ -258,7 +272,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         return value;
     }
     private void loop_until_rw_status_false(){
-	    synchronized (rw_mutex) {
+        synchronized (rw_mutex) {
             while (rw_status) {
                 try {
                     rw_mutex.wait();
@@ -268,41 +282,54 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
     }
-	private void process_insert(String key, String value){
+    private void process_insert(String key, String value){
         try{
             NodeInfo node = find_key_location(key);
             String to_node_no = node.getMy_no();
             String suc_1="";
             String suc_2="";
+            suc_1=node.getSuc_1();
+            suc_2=node.getSuc_2();
             if(to_node_no.equals(my_node_no)){  // If the key belongs to me then store it in my node and two of my successors
                 insert_in_my_node(key,value);
                 String forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
-                suc_1=node.getSuc_1();
-                suc_2=node.getSuc_2();
                 loop_until_rw_status_false();
                 rw_status=true;
                 synchronized (rw_mutex) {
-                    send_insert_msg(forward_msg, suc_1);
-                    send_insert_msg(forward_msg, suc_2);
+                    send_msg_to_client(forward_msg, suc_1);
+                    send_msg_to_client(forward_msg, suc_2);
                     rw_status = false;
                     rw_mutex.notify();
                 }
             }
             else{ // If it doesn't belong to me, send it to the guy to whom it belongs
                 String forward_msg = key_insert+delimiter+key+delimiter+value;
-                send_insert_msg(forward_msg,to_node_no);
+                boolean status = send_msg_to_client(forward_msg,to_node_no);
+                if(!status){
+                    Log.e("Node Failure :",to_node_no);
+                    forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
+                    loop_until_rw_status_false();
+                    rw_status=true;
+                    synchronized (rw_mutex) {
+                        send_msg_to_client(forward_msg, suc_1);
+                        send_msg_to_client(forward_msg, suc_2);
+                        rw_status = false;
+                        rw_mutex.notify();
+                    }
+                }
             }
         }catch (Exception e){
             e.printStackTrace();
         }
     }
-    public boolean send_insert_msg(String msg, String to_node_no){
+    public boolean send_msg_to_client(String msg, String to_node_no){
         String msgToSend = msg;
         String toPort = to_node_no;
         Socket socket;
         toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
         PrintWriter out=null;
         BufferedReader bR=null;
+        String reply="";
         Log.v("Send insert message","Message to send : "+msgToSend);
         try {
             socket = new Socket();
@@ -312,7 +339,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msgToSend);
             bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
-            if(bR==null){
+            reply = bR.readLine();
+            if(!reply.equals(server_reply)){
+                Log.e("Node failure (send)",to_node_no+" "+reply);
                 return false;
             }
         }catch (IOException e){
@@ -390,14 +419,47 @@ public class SimpleDynamoProvider extends ContentProvider {
         return node;
     }
     private NodeInfo find_node_by_node_no(String node_no){
-	    NodeInfo temp_node=null;
-	    for(NodeInfo node : nodes ){
-	        if(node.getMy_no().equals(node_no)) {
+        NodeInfo temp_node=null;
+        for(NodeInfo node : nodes ){
+            if(node.getMy_no().equals(node_no)) {
                 return node;
             }
         }
 
         return temp_node;
+    }
+    private class Update_live_status_task extends AsyncTask<String, Void, Void> {
+
+        @Override
+        protected Void doInBackground(String... msgs) {
+            String msgToSend = msgs[0];
+            Socket socket;
+
+            PrintWriter out=null;
+            BufferedReader bR=null;
+            String message="";
+            Log.v("Client task","Message to send : "+msgToSend);
+            try {
+                for(String toPort : node_numbers) {
+                    toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
+                    socket = new Socket();
+                    socket.connect(new InetSocketAddress(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                            Integer.parseInt(toPort)));
+                    out = new PrintWriter(socket.getOutputStream(), true);
+                    out.println(msgToSend);
+                    bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
+                    message = bR.readLine();
+                    if (message == null) {
+                        // handle when node join fails
+                    }
+                }
+            }catch (IOException e){
+                e.printStackTrace();
+            }catch (Exception e){
+                e.printStackTrace();
+            }
+            return null;
+        }
     }
     private class ServerTask extends AsyncTask<ServerSocket, String, Void> { // Server task to accept client connections and process their messages
         @Override
@@ -418,9 +480,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                         message = bR.readLine();
                         message = message.trim();
                         out = new PrintWriter(client_sock.getOutputStream(), true);
-                        out.println(server_reply);
                         Log.v("Server task","message :"+message);
                         process_srvr_msg(message);
+                        out.println(server_reply);
 
                     }catch(Exception e1){
                         e1.printStackTrace();
@@ -452,7 +514,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                     process_srvr_insert(format[1],format[2],true);
             }
             else if(format[0].equals(key_search)){
-                process_query_serverside(format[1],format[2]);
+                process_query_server_side(format[1],format[2]);
             }
             else if(format[0].equals(key_result)){
                 if(format.length!=3)
@@ -460,17 +522,78 @@ public class SimpleDynamoProvider extends ContentProvider {
                 else
                     process_query_result(format[1],format[2]);
             }
-//            else if(format[0].equals(add_key)){
-//                process_distribute_keys(format[1]);
-//            }
+            else if(format[0].equals(ping_msg)){
+                process_alive_info(format[1]);
+            }
+            else if(format[0].equals(add_key)){
+                process_distribute_keys(format[1],format[2]);
+            }
             else if(format[0].equals(del_key)){
                 if(format.length==3)
-                    process_delete_serverside(format[1],format[2],false);
+                    process_delete_server_side(format[1],format[2],false);
                 else
-                    process_delete_serverside(format[1],format[2],true);
+                    process_delete_server_side(format[1],format[2],true);
             }
         }
-        public void process_delete_serverside(String selection,String from_port,boolean isRep){
+        public void process_distribute_keys(String keys,String from_port){
+            try {
+                String splits[] = keys.split(newline_delimiter);
+                String key_splits[];
+                String key = "";
+                String value = "";
+                NodeInfo node = null;
+                Log.v("D_Keys Process", from_port);
+                for (String splitter : splits) {
+                    if (splitter.trim() != "") {
+                        key_splits = splitter.split(other_seperator);
+                        key = key_splits[0];
+                        value = key_splits[1];
+                        node = find_key_location(key);
+                        if (node.getMy_no().equals(my_node_no) && from_port.equals(my_node_info.getSuc_1())) { // if the key belongs to me and it came from my immediate successor
+                            insert_in_my_node(key, value);
+                            my_keys.add(key);
+                        } else if (node.getSuc_1().equals(my_node_no) && from_port.equals(my_node_info.getPre_1())) { // If I am the immediate replica and the info came from my immediate predecessor
+                            insert_in_my_node(key, value);
+                            my_keys.add(key);
+                        } else if (node.getSuc_2().equals(my_node_no) && from_port.equals(my_node_info.getPre_2())) { // I I am the tail and insert came from my head
+                            insert_in_my_node(key, value);
+                            my_keys.add(key);
+                        }
+
+                    }
+                }
+            }catch(Exception e){
+                e.printStackTrace();
+            }
+        }
+        public void process_alive_info(String from_port){
+            if(should_I_proc_alive_info(from_port)){
+                distribute_keys(from_port);
+            }
+        }
+        public void distribute_keys(String from_port){
+            try {
+                String dist_key_msg=add_key+delimiter;
+                String value="";
+                for(String key : my_keys){
+                    value=query_my_node(key);
+                    dist_key_msg+=key+other_seperator+value+newline_delimiter;
+                }
+                dist_key_msg+=delimiter+my_node_no;
+                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,dist_key_msg,from_port);
+            }catch (Exception e){
+                e.printStackTrace();
+            }
+
+        }
+        public boolean should_I_proc_alive_info(String from_port){  // return true if you need to process any keys to the alive port
+            if(my_keys.isEmpty())
+                return false;
+            else if(from_port.equals(my_node_no))
+                return false;
+            return true;
+        }
+        public void process_delete_server_side(String selection, String from_port, boolean isRep){
             if(selection.equals(all_node_queryall)){
                 delete_my_keys();
                 if(!from_port.equals(my_node_info.getSuc_1())){
@@ -506,7 +629,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                             Log.v("Process Asterisk","Recevied values from :"+recv_port);
                         }
                     }
-                    if(recv_port.equals(my_node_info.getPre_1())){
+                    node_start_recv_lst.add(recv_port);
+                    if(ready_to_return_asterisk()){
                         query_started=false;
                         global_keys.notify();
                     }
@@ -514,7 +638,27 @@ public class SimpleDynamoProvider extends ContentProvider {
                 }
             }
         }
-        public void process_query_serverside(String key, String from_port){ // function to process received query request
+        public boolean ready_to_return_asterisk(){
+            int min_list_size = 3;
+            int accepted_list_size = 4;
+            Log.v("Ready to return : ","Size : "+node_start_recv_lst.size());
+            if(node_start_recv_lst.size() < min_list_size)
+                return false;
+            else if(node_start_recv_lst.size()==accepted_list_size)
+                return true;
+            else{
+                for(String node_no : node_numbers){
+                    if(!node_no.equals(my_node_no)) {
+                        if (!nodes_status.get(node_no)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+        public void process_query_server_side(String key, String from_port){ // function to process received query request
             try {
                 if(key.equals(all_node_queryall)){
                     // handle this scenario when asked for all keys
@@ -526,9 +670,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                     }
                     return_msg+=my_node_no;
                     new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, return_msg, from_port); // returning my keys to node who wants it
-                    String forward_search_msg = key_search + delimiter + key+delimiter+from_port;
-                    if(!my_node_info.getSuc_1().equals(from_port))
-                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, my_node_info.getSuc_1()); // forwarding the search to my successor
 
                 }
                 else {
@@ -560,8 +701,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String my_suc1 = my_node_info.getSuc_1();
                     String my_suc2 = my_node_info.getSuc_2();
                     String forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
-                    send_insert_msg(forward_msg, my_suc1);
-                    send_insert_msg(forward_msg, my_suc2);
+                    send_msg_to_client(forward_msg, my_suc1);
+                    send_msg_to_client(forward_msg, my_suc2);
                 }
                 rw_status = false;
                 rw_mutex.notify();
@@ -584,7 +725,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
             PrintWriter out=null;
             BufferedReader bR=null;
+            String message="";
             Log.v("Client task","Message to send : "+msgToSend);
+            boolean status = true;
             try {
                 socket = new Socket();
                 socket.connect(new InetSocketAddress(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -592,28 +735,39 @@ public class SimpleDynamoProvider extends ContentProvider {
                 out = new PrintWriter(socket.getOutputStream(), true);
                 out.println(msgToSend);
                 bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
-                if(bR==null){
-                    // handle when node join fails
+                message = bR.readLine();
+                if(!message.equals(server_reply)){
+                    status=false;
                 }
             }catch (IOException e){
                 e.printStackTrace();
+                status=false;
             }catch (Exception e){
                 e.printStackTrace();
+                status=false;
+            }finally {
+                toPort = String.valueOf(Integer.parseInt(toPort)/port_mul_factor);
+                if (!status) {
+                    nodes_status.put(toPort,false);
+                } else {
+                    nodes_status.put(toPort,true);
+                }
             }
+
             return null;
         }
     }
     private void create_nodes_info(){
-	    int one_shift=1;
-	    int two_shift=2;
-	    String temp_hash="";
-	    int count=0;
-	    int ring_size = ring_list.size();
-	    int index_shift=1;
-	    int max_ring_index=ring_size-index_shift;
+        int one_shift=1;
+        int two_shift=2;
+        String temp_hash="";
+        int count=0;
+        int ring_size = ring_list.size();
+        int index_shift=1;
+        int max_ring_index=ring_size-index_shift;
         NodeInfo new_node;
-	    String my_no="",my_pre1="",my_pre2="",my_suc1="",my_suc2="";
-	    for(String hash_id : ring_list){
+        String my_no="",my_pre1="",my_pre2="",my_suc1="",my_suc2="";
+        for(String hash_id : ring_list){
             my_no = id_no_map.get(hash_id);
             if(count-one_shift<0){
                 temp_hash=ring_list.get(ring_size+count-one_shift);
