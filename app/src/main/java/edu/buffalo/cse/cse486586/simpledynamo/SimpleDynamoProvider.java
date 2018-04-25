@@ -118,6 +118,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
         // TODO Auto-generated method stub
+        Log.v("Query Called","Key : "+selection);
         MatrixCursor mc = process_query(selection);
         return mc;
     }
@@ -161,6 +162,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         String[] column_names ={"key","value"};
         MatrixCursor mc = new MatrixCursor(column_names);
         try{
+
             if(key.equals(curr_node_queryall)){
                 Log.v("Query","Querying "+key);
                 String value="";
@@ -188,22 +190,22 @@ public class SimpleDynamoProvider extends ContentProvider {
         try {
             NodeInfo node = find_key_location(selection);
             if (node.getSuc_2().equals(my_node_no)) {
+                Log.v("Query","my node");
+                Log.v("Query","Waiting for lock");
                 loop_until_rw_status_false(); // looping until the state is false
+                Log.v("Query","Obtained lock");
                 rw_status=true; // changing status so no one else can access
                 synchronized (rw_mutex) {
                     value = query_my_node(selection);
                     rw_status = false; // changing status so others can access
                     rw_mutex.notify();
+                    Log.v("Query","Releasing lock");
                 }
                 mc.newRow().add("key", selection).add("value", value.trim());
             } else {
+                Log.v("Query","forward node");
                 String forward_search_msg = key_search + delimiter + selection + delimiter + my_node_no;
                 query_started = true;
-//                boolean status = send_msg_to_client(forward_search_msg,node.getSuc_2());
-//                if(!status){
-//                    Log.e("Node failure (Read)",node.getSuc_2());
-//                    send_msg_to_client(forward_search_msg,node.getSuc_1());
-//                }
                 new QueryTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_2());
                 synchronized (global_keys) {
                     while (query_started) {
@@ -279,6 +281,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         return value;
     }
     private void loop_until_rw_status_false(){
+        if(!rw_status)
+            return;
         synchronized (rw_mutex) {
             while (rw_status) {
                 try {
@@ -297,28 +301,35 @@ public class SimpleDynamoProvider extends ContentProvider {
             String suc_2="";
             suc_1=node.getSuc_1();
             suc_2=node.getSuc_2();
-            if(to_node_no.equals(my_node_no)){  // If the key belongs to me then store it in my node and two of my successors
-                insert_in_my_node(key,value);
-                String forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
-                suc_1=node.getSuc_1();
-                suc_2=node.getSuc_2();
+            loop_until_rw_status_false();
+            if (to_node_no.equals(my_node_no)) {  // If the key belongs to me then store it in my node and two of my successors
+                loop_until_rw_status_false();
+                rw_status=true;
+                synchronized (rw_mutex) {
+                    insert_in_my_node(key, value);
+                    rw_status=false;
+                    rw_mutex.notify();
+                }
+                String forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
                 send_msg_to_client(forward_msg, suc_1);
                 send_msg_to_client(forward_msg, suc_2);
-            }
-            else{ // If it doesn't belong to me, send it to the guy to whom it belongs
-                String forward_msg = key_insert+delimiter+key+delimiter+value;
-                boolean status = send_msg_to_client(forward_msg,to_node_no);
-                if(!status){
-                    Log.e("Node Failure :",to_node_no);
-                    forward_msg = key_insert+delimiter+key+delimiter+value+delimiter+replica_identifier;
-					send_msg_to_client(forward_msg, suc_1);
+            } else { // If it doesn't belong to me, send it to the guy to whom it belongs
+                Log.v("Insert : ", "Forwarding key :" + key + " to the coordinator");
+                String forward_msg = key_insert + delimiter + key + delimiter + value;
+                boolean status = send_msg_to_client(forward_msg, to_node_no);
+                if (!status) {
+                    Log.e("Node Failure :", to_node_no);
+                    forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
+                    send_msg_to_client(forward_msg, suc_1);
                     send_msg_to_client(forward_msg, suc_2);
-                    
+
                 }
             }
         }catch (Exception e){
             e.printStackTrace();
         }
+        Log.v("Insert","Done");
+
     }
     public boolean send_msg_to_client(String msg, String to_node_no){
         String msgToSend = msg;
@@ -328,7 +339,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         PrintWriter out=null;
         BufferedReader bR=null;
         String reply="";
-        Log.v("Send insert message","Message to send : "+msgToSend);
+        Log.v("Send insert message","Message to send : "+msgToSend+ "To port :"+toPort);
         try {
             socket = new Socket();
             socket.connect(new InetSocketAddress(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
@@ -342,7 +353,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                 Log.e("Node failure (send)",to_node_no+" "+reply);
                 return false;
             }
-            reply = bR.readLine();
+            else{
+                Log.v("Client ","Message sent successfully");
+            }
+            bR.readLine();
         }catch (IOException e){
             e.printStackTrace();
             return false;
@@ -682,38 +696,84 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
         public void send_my_answer(String key,String to_port){
-            loop_until_rw_status_false();
-            rw_status=true;
-            synchronized (rw_mutex) {
-                String value = query_my_node(key);
-                rw_status = false;
-                rw_mutex.notify();
-                String qu_res_msg = key_result+delimiter+key+delimiter+value;
-                Log.v("Server : ","Replying answer for :"+key);
-                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,qu_res_msg,to_port);
+            if(my_keys.indexOf(key)<0){
+                Log.v("Query-Server","Could not find the key");
+                NodeInfo node = find_key_location(key);
+                String forward_search_msg = key_search + delimiter + key + delimiter + to_port;
+                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_1());
+            }
+            else {
+                Log.v("Query-server", "Waiting for the lock");
+                loop_until_rw_status_false();
+                Log.v("Query-server", "Obtained the lock");
+                rw_status = true;
+                synchronized (rw_mutex) {
+                    String value = query_my_node(key);
+                    Log.v("Query-server", "Releasing the lock");
+                    rw_status = false;
+                    rw_mutex.notify();
+                    String qu_res_msg = key_result + delimiter + key + delimiter + value;
+                    Log.v("Server : ", "Replying answer for :" + key);
+                    new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, qu_res_msg, to_port);
+                }
             }
 
         }
         private void process_srvr_insert(String key, String value,boolean isRep){
+            Log.v("Insert","Processing server side");
             loop_until_rw_status_false();
+            Log.v("Insert-Server","Obtained the lock");
             rw_status=true;
             synchronized (rw_mutex) {
                 insert_in_my_node(key, value);
+                rw_status = false;
+                rw_mutex.notify();
+                Log.v("Insert-Server","Releasing lock");
+            }
                 if (!isRep) {
                     String my_suc1 = my_node_info.getSuc_1();
                     String my_suc2 = my_node_info.getSuc_2();
+                    Log.v("Insert :","Sending keys to replica from the server side :"+key);
                     String forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
                     send_msg_to_client(forward_msg, my_suc1);
                     send_msg_to_client(forward_msg, my_suc2);
                 }
-                rw_status = false;
-                rw_mutex.notify();
-            }
+            Log.v("Insert-Server","Insertion done");
+
         }
 
         @Override
         protected void onProgressUpdate(String... values) {
-            String message = values[0];
+            String msg = values[0];
+            String[] format;
+            format=msg.split(delimiter);
+            if(format[0].equals(key_insert)){
+                if(format.length==3)
+                    process_srvr_insert(format[1],format[2],false);
+                else
+                    process_srvr_insert(format[1],format[2],true);
+            }
+            else if(format[0].equals(key_search)){
+                process_query_server_side(format[1],format[2]);
+            }
+            else if(format[0].equals(key_result)){
+                if(format.length!=3)
+                    process_query_result(format[1],"");
+                else
+                    process_query_result(format[1],format[2]);
+            }
+            else if(format[0].equals(ping_msg)){
+                process_alive_info(format[1]);
+            }
+            else if(format[0].equals(add_key)){
+                process_distribute_keys(format[1],format[2]);
+            }
+            else if(format[0].equals(del_key)){
+                if(format.length==3)
+                    process_delete_server_side(format[1],format[2],false);
+                else
+                    process_delete_server_side(format[1],format[2],true);
+            }
         }
 
     }
@@ -728,7 +788,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             PrintWriter out=null;
             BufferedReader bR=null;
             String message="";
-            Log.v("Query task","Message to send : "+msgToSend);
+            Log.v("Query task","Message to send : "+msgToSend+ "To Port : "+toPort);
             boolean status = true;
             try {
                 socket = new Socket();
@@ -775,7 +835,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             PrintWriter out=null;
             BufferedReader bR=null;
             String message="";
-            Log.v("Client task","Message to send : "+msgToSend);
+            Log.v("Client task","Message to send : "+msgToSend+ "To Port : "+toPort);
             boolean status = true;
             try {
                 socket = new Socket();
