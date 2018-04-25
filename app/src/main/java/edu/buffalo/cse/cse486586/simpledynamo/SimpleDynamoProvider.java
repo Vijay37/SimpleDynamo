@@ -316,14 +316,9 @@ public class SimpleDynamoProvider extends ContentProvider {
             } else { // If it doesn't belong to me, send it to the guy to whom it belongs
                 Log.v("Insert : ", "Forwarding key :" + key + " to the coordinator");
                 String forward_msg = key_insert + delimiter + key + delimiter + value;
-                boolean status = send_msg_to_client(forward_msg, to_node_no);
-                if (!status) {
-                    Log.e("Node Failure :", to_node_no);
-                    forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
-                    send_msg_to_client(forward_msg, suc_1);
-                    send_msg_to_client(forward_msg, suc_2);
-
-                }
+                send_msg_to_client(forward_msg,to_node_no);
+                send_msg_to_client(forward_msg, suc_1);
+                send_msg_to_client(forward_msg, suc_2);
             }
         }catch (Exception e){
             e.printStackTrace();
@@ -344,7 +339,6 @@ public class SimpleDynamoProvider extends ContentProvider {
             socket = new Socket();
             socket.connect(new InetSocketAddress(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
                     Integer.parseInt(toPort)));
-//            socket.setSoTimeout(timeout);
             out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msgToSend);
             bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
@@ -730,14 +724,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 rw_mutex.notify();
                 Log.v("Insert-Server","Releasing lock");
             }
-                if (!isRep) {
-                    String my_suc1 = my_node_info.getSuc_1();
-                    String my_suc2 = my_node_info.getSuc_2();
-                    Log.v("Insert :","Sending keys to replica from the server side :"+key);
-                    String forward_msg = key_insert + delimiter + key + delimiter + value + delimiter + replica_identifier;
-                    send_msg_to_client(forward_msg, my_suc1);
-                    send_msg_to_client(forward_msg, my_suc2);
-                }
             Log.v("Insert-Server","Insertion done");
 
         }
