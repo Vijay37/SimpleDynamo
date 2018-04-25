@@ -210,6 +210,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         global_keys.wait();
                     }
                     if(read_failed){
+                        read_failed=false;
                         query_started=true;
                         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_1());
                         while (query_started) {
@@ -688,6 +689,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 rw_status = false;
                 rw_mutex.notify();
                 String qu_res_msg = key_result+delimiter+key+delimiter+value;
+                Log.v("Server : ","Replying answer for :"+key);
                 new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,qu_res_msg,to_port);
             }
 
@@ -749,9 +751,11 @@ public class SimpleDynamoProvider extends ContentProvider {
                 toPort = String.valueOf(Integer.parseInt(toPort)/port_mul_factor);
                 if (!status) {
                     nodes_status.put(toPort,false);
-                    query_started=false;
-                    read_failed=true;
-                    global_keys.notify();
+                    synchronized (global_keys) {
+                        query_started = false;
+                        read_failed = true;
+                        global_keys.notify();
+                    }
 
                 } else {
                     nodes_status.put(toPort,true);
