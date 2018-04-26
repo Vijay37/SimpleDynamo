@@ -134,7 +134,10 @@ public class SimpleDynamoProvider extends ContentProvider {
     }
     public void delete_key_in_my_node(String key){
         try {
-            getContext().deleteFile(key);
+            if(my_keys.contains(key)) {
+                getContext().deleteFile(key);
+                my_keys.remove(key);
+            }
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -165,16 +168,25 @@ public class SimpleDynamoProvider extends ContentProvider {
             if(key.equals(curr_node_queryall)){
                 Log.v("Query","Querying "+key);
                 String value="";
+
+                if(my_keys.isEmpty()) {
+                    Log.v("@","no keys to return");
+                    return mc;
+                }
+                Log.v("@","Taking lock");
                 loop_until_rw_status_false();
+                Log.v("@","Obtained lock");
                 rw_status=true;
                 synchronized (rw_mutex) {
                     for (String selection : my_keys) {
                         value = query_my_node(selection);
+                        Log.v("@","Adding key"+key+" Value:"+value);
                         mc.newRow().add("key", selection).add("value", value.trim());
                     }
                     rw_status=false;
                     rw_mutex.notify();
                 }
+                Log.v("@","Returning lock");
             }
             else if(key.equals(all_node_queryall)){
                 // write function to get all data
@@ -371,8 +383,10 @@ public class SimpleDynamoProvider extends ContentProvider {
             FileOutputStream fos = getContext().openFileOutput(key, Context.MODE_PRIVATE);
             fos.write(value.getBytes());
             fos.close();
-            if(my_keys.indexOf(key)<0)
+            if(!my_keys.contains(key))
                 my_keys.add(key);
+            else
+                Log.v("Insert at my node : ","Duplicate key entry");
         }catch (Exception e){
             e.printStackTrace();
         }
@@ -423,6 +437,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         node=find_node_by_node_no(node_no);
                         return node;
                     }
+                    prev_node_hash=temp_hash;
                 }
             }
 
@@ -558,7 +573,9 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String value = "";
                 NodeInfo node = null;
                 Log.v("D_Keys Process", from_port);
+                Log.v("D_keys_Process","Taking lock");
                 loop_until_rw_status_false();
+                Log.v("D_keys_Process","Obtained lock");
                 rw_status=true;
                 synchronized (rw_mutex) {
                     for (String splitter : splits) {
@@ -605,6 +622,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         }
         public boolean should_I_proc_alive_info(String from_port){  // return true if you need to process any keys to the alive port
+            NodeInfo node = find_node_by_node_no(from_port);
             if(my_keys.isEmpty())
                 return false;
             else if(from_port.equals(my_node_no))
@@ -699,7 +717,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
         public void send_my_answer(String key,String to_port){
-            if(my_keys.indexOf(key)<0){
+            if(!my_keys.contains(key)){
                 Log.v("Query-Server","Could not find the key");
                 NodeInfo node = find_key_location(key);
                 String forward_search_msg = key_search + delimiter + key + delimiter + to_port;
