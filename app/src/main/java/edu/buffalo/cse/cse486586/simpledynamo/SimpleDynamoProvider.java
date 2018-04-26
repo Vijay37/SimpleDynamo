@@ -38,7 +38,6 @@ public class SimpleDynamoProvider extends ContentProvider {
     private NodeInfo my_node_info;
     private Object rw_mutex = new Object();
     private boolean rw_status = false;
-    private boolean pre_node_sts = true;
     private boolean read_failed =false;
     // Array list and maps
     private String[] node_numbers={"5554","5556","5558","5560","5562"};
@@ -166,9 +165,15 @@ public class SimpleDynamoProvider extends ContentProvider {
             if(key.equals(curr_node_queryall)){
                 Log.v("Query","Querying "+key);
                 String value="";
-                for(String selection : my_keys) {
-                    value=query_my_node(selection);
-                    mc.newRow().add("key", selection).add("value", value.trim());
+                loop_until_rw_status_false();
+                rw_status=true;
+                synchronized (rw_mutex) {
+                    for (String selection : my_keys) {
+                        value = query_my_node(selection);
+                        mc.newRow().add("key", selection).add("value", value.trim());
+                    }
+                    rw_status=false;
+                    rw_mutex.notify();
                 }
             }
             else if(key.equals(all_node_queryall)){
@@ -366,7 +371,8 @@ public class SimpleDynamoProvider extends ContentProvider {
             FileOutputStream fos = getContext().openFileOutput(key, Context.MODE_PRIVATE);
             fos.write(value.getBytes());
             fos.close();
-            my_keys.add(key);
+            if(my_keys.indexOf(key)<0)
+                my_keys.add(key);
         }catch (Exception e){
             e.printStackTrace();
         }
@@ -552,24 +558,27 @@ public class SimpleDynamoProvider extends ContentProvider {
                 String value = "";
                 NodeInfo node = null;
                 Log.v("D_Keys Process", from_port);
-                for (String splitter : splits) {
-                    if (splitter.trim() != "") {
-                        key_splits = splitter.split(other_seperator);
-                        key = key_splits[0];
-                        value = key_splits[1];
-                        node = find_key_location(key);
-                        if (node.getMy_no().equals(my_node_no) && from_port.equals(my_node_info.getSuc_1())) { // if the key belongs to me and it came from my immediate successor
-                            insert_in_my_node(key, value);
-                            my_keys.add(key);
-                        } else if (node.getSuc_1().equals(my_node_no) && from_port.equals(my_node_info.getPre_1())) { // If I am the immediate replica and the info came from my immediate predecessor
-                            insert_in_my_node(key, value);
-                            my_keys.add(key);
-                        } else if (node.getSuc_2().equals(my_node_no) && from_port.equals(my_node_info.getPre_2())) { // I I am the tail and insert came from my head
-                            insert_in_my_node(key, value);
-                            my_keys.add(key);
-                        }
+                loop_until_rw_status_false();
+                rw_status=true;
+                synchronized (rw_mutex) {
+                    for (String splitter : splits) {
+                        if (splitter.trim() != "") {
+                            key_splits = splitter.split(other_seperator);
+                            key = key_splits[0];
+                            value = key_splits[1];
+                            node = find_key_location(key);
+                            if (node.getMy_no().equals(my_node_no) && from_port.equals(my_node_info.getSuc_1())) { // if the key belongs to me and it came from my immediate successor
+                                insert_in_my_node(key, value);
+                            } else if (node.getSuc_1().equals(my_node_no) && from_port.equals(my_node_info.getPre_1())) { // If I am the immediate replica and the info came from my immediate predecessor
+                                insert_in_my_node(key, value);
+                            } else if (node.getSuc_2().equals(my_node_no) && from_port.equals(my_node_info.getPre_2())) { // I I am the tail and insert came from my head
+                                insert_in_my_node(key, value);
+                            }
 
+                        }
                     }
+                    rw_status=false;
+                    rw_mutex.notify();
                 }
             }catch(Exception e){
                 e.printStackTrace();
@@ -731,35 +740,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         @Override
         protected void onProgressUpdate(String... values) {
             String msg = values[0];
-            String[] format;
-            format=msg.split(delimiter);
-            if(format[0].equals(key_insert)){
-                if(format.length==3)
-                    process_srvr_insert(format[1],format[2],false);
-                else
-                    process_srvr_insert(format[1],format[2],true);
-            }
-            else if(format[0].equals(key_search)){
-                process_query_server_side(format[1],format[2]);
-            }
-            else if(format[0].equals(key_result)){
-                if(format.length!=3)
-                    process_query_result(format[1],"");
-                else
-                    process_query_result(format[1],format[2]);
-            }
-            else if(format[0].equals(ping_msg)){
-                process_alive_info(format[1]);
-            }
-            else if(format[0].equals(add_key)){
-                process_distribute_keys(format[1],format[2]);
-            }
-            else if(format[0].equals(del_key)){
-                if(format.length==3)
-                    process_delete_server_side(format[1],format[2],false);
-                else
-                    process_delete_server_side(format[1],format[2],true);
-            }
         }
 
     }
