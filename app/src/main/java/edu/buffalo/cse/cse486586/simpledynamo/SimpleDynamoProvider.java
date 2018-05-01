@@ -639,6 +639,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                 loop_until_rw_status_false();
                 Log.v("D_keys_Process","Obtained lock");
                 rw_status=true;
+                String temp_value="";
                 synchronized (rw_mutex) {
                     for (String splitter : splits) {
                         if (splitter.trim() != "") {
@@ -646,9 +647,8 @@ public class SimpleDynamoProvider extends ContentProvider {
                             key = key_splits[0];
                             value = key_splits[1];
                             Log.v("D_Process","Processing "+key);
-                            if(my_keys.contains(key))
-                                continue;
-                            else
+                            temp_value=query_my_node(key);
+                            if(temp_value.isEmpty() || temp_value==null)
                                 insert_in_my_node(key, value);
 
                         }
