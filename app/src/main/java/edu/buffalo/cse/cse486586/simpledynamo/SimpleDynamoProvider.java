@@ -1,6 +1,7 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -109,6 +110,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         // TODO Auto-generated method stub
         set_my_node_no();
         create_ring_structure();
+        clear_my_files();
         update_alive_status();
         return false;
     }
@@ -132,10 +134,20 @@ public class SimpleDynamoProvider extends ContentProvider {
         String alive_sts_msg=ping_msg+delimiter+my_node_no;
         new Update_live_status_task().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,alive_sts_msg);
     }
+    public void clear_my_files(){
+        Log.v("Clearing files","Started");
+        File files_dir=getContext().getFilesDir();
+        File[] files=files_dir.listFiles();
+        for(File file : files){
+            Log.v("Clearing files","File :"+file.getName());
+            getContext().deleteFile(file.getName());
+        }
+    }
     public void delete_key_in_my_node(String key){
         try {
             if(my_keys.contains(key)) {
                 getContext().deleteFile(key);
+
                 my_keys.remove(key);
             }
         } catch (Exception e) {
@@ -207,16 +219,41 @@ public class SimpleDynamoProvider extends ContentProvider {
         try {
             NodeInfo node = find_key_location(selection);
             if (node.getSuc_2().equals(my_node_no)) {
-                Log.v("Query","my node");
-                Log.v("Query","Waiting for lock");
-                loop_until_rw_status_false(); // looping until the state is false
-                Log.v("Query","Obtained lock");
-                rw_status=true; // changing status so no one else can access
-                synchronized (rw_mutex) {
-                    value = query_my_node(selection);
-                    rw_status = false; // changing status so others can access
-                    rw_mutex.notify();
-                    Log.v("Query","Releasing lock");
+                if(my_keys.contains(selection)) {
+                    Log.v("Query", "my node");
+                    Log.v("Query", "Waiting for lock");
+                    loop_until_rw_status_false(); // looping until the state is false
+                    Log.v("Query", "Obtained lock");
+                    rw_status = true; // changing status so no one else can access
+                    synchronized (rw_mutex) {
+                        value = query_my_node(selection);
+                        rw_status = false; // changing status so others can access
+                        rw_mutex.notify();
+                        Log.v("Query", "Releasing lock");
+                    }
+                }
+                else{
+                    String forward_search_msg = key_search + delimiter + selection + delimiter + my_node_no;
+                    query_started = true;
+                    new QueryTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_1());
+                    synchronized (global_keys) {
+                        while (query_started) {
+                            global_keys.wait();
+                        }
+                        if(read_failed){
+                            read_failed=false;
+                            query_started=true;
+                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getMy_no());
+                            while (query_started) {
+                                global_keys.wait();
+                            }
+                        }
+                        for (String key : global_keys) {
+                            value = global_values.get(key);
+                            mc.newRow().add("key", key).add("value", value.trim());
+                        }
+                        global_keys.clear();// resetting global_keys
+                    }
                 }
                 mc.newRow().add("key", selection).add("value", value.trim());
             } else {
@@ -346,7 +383,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     public boolean send_msg_to_client(String msg, String to_node_no){
         String msgToSend = msg;
         String toPort = to_node_no;
-        Socket socket;
+        Socket socket=null;
         toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calculating actual exact port number
         PrintWriter out=null;
         BufferedReader bR=null;
@@ -374,6 +411,18 @@ public class SimpleDynamoProvider extends ContentProvider {
         }catch (Exception e){
             e.printStackTrace();
             return false;
+        }finally {
+            try {
+                if (out != null)
+                    out.close();
+                if (bR != null)
+                    bR.close();
+                if (socket != null)
+                    socket.close();
+            }catch(Exception e1){
+                e1.printStackTrace();
+            }
+
         }
         return true;
     }
@@ -461,7 +510,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         @Override
         protected Void doInBackground(String... msgs) {
             String msgToSend = msgs[0];
-            Socket socket;
+            Socket socket=null;
 
             PrintWriter out=null;
             BufferedReader bR=null;
@@ -469,7 +518,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             Log.v("Update Alive status","Message to send : "+msgToSend);
             try {
                 for(String toPort : node_numbers) {
-                    if(toPort.equals(my_node_no))
+                    if(toPort.equals(my_node_no) || toPort.equals(my_node_info.getSuc_2())) // Don't send it to me and my tail
                         continue;
                     toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
                     socket = new Socket();
@@ -488,6 +537,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }catch (Exception e){
                 e.printStackTrace();
+            }
+            finally {
+                if(socket !=null) {
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+
             }
             return null;
         }
@@ -586,29 +645,11 @@ public class SimpleDynamoProvider extends ContentProvider {
                             key_splits = splitter.split(other_seperator);
                             key = key_splits[0];
                             value = key_splits[1];
-                            node = find_key_location(key);
                             Log.v("D_Process","Processing "+key);
-                            if (node.getMy_no().equals(my_node_no) && from_port.equals(my_node_info.getSuc_1())) { // if the key belongs to me and it came from my immediate successor
+                            if(my_keys.contains(key))
+                                continue;
+                            else
                                 insert_in_my_node(key, value);
-                            } else if (node.getSuc_1().equals(my_node_no) && from_port.equals(my_node_info.getPre_1())) { // If I am the immediate replica and the info came from my immediate predecessor
-                                insert_in_my_node(key, value);
-                            } else if (node.getSuc_2().equals(my_node_no) && from_port.equals(my_node_info.getPre_2())) { // I I am the tail and insert came from my head
-                                insert_in_my_node(key, value);
-                            }
-
-                            // Store old objects if keys do not exist
-                            else if (node.getMy_no().equals(my_node_no) && from_port.equals(my_node_info.getSuc_2())) { // if the key belongs to me and it came from my second successor
-                                if(!my_keys.contains(key))
-                                    insert_in_my_node(key, value);
-                            }
-                            else if (node.getSuc_1().equals(my_node_no) && from_port.equals(my_node_info.getSuc_1())) { // If I am the immediate replica and the info came from my successor
-                                if(!my_keys.contains(key))
-                                    insert_in_my_node(key, value);
-                            }
-                            else if (node.getSuc_2().equals(my_node_no) && from_port.equals(my_node_info.getPre_1())) { // I I am the tail and insert came from my immediate predecessor
-                                if(!my_keys.contains(key))
-                                    insert_in_my_node(key, value);
-                            }
 
                         }
                     }
@@ -621,17 +662,32 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
         public void process_alive_info(String from_port){
-            if(should_I_proc_alive_info(from_port)){
-                distribute_keys(from_port);
-            }
+            distribute_keys(from_port);
         }
         public void distribute_keys(String from_port){
             try {
                 String dist_key_msg=add_key+delimiter;
                 String value="";
-                for(String key : my_keys){
-                    value=query_my_node(key);
-                    dist_key_msg+=key+other_seperator+value+newline_delimiter;
+                NodeInfo node=null;
+                boolean is_suc=false;
+                if(my_node_info.getSuc_2().equals(from_port) || my_node_info.getSuc_1().equals(from_port)){ // If the new node is one of my successors
+                    is_suc=true;
+                }
+                loop_until_rw_status_false();
+                rw_status=true;
+                synchronized (rw_mutex) {
+                    for (String key : my_keys) {
+                        node = find_key_location(key);
+                        if (node.getMy_no().equals(from_port) && !is_suc) {  // send if key belongs to the new node and it is not my successor
+                            value = query_my_node(key);
+                            dist_key_msg += key + other_seperator + value + newline_delimiter;
+                        } else if (node.getMy_no().equals(my_node_no) && is_suc) { // send if key belongs to me and the new node is one of my successors
+                            value = query_my_node(key);
+                            dist_key_msg += key + other_seperator + value + newline_delimiter;
+                        }
+                    }
+                    rw_status=false;
+                    rw_mutex.notify();
                 }
                 dist_key_msg+=delimiter+my_node_no;
                 new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,dist_key_msg,from_port);
@@ -639,14 +695,6 @@ public class SimpleDynamoProvider extends ContentProvider {
                 e.printStackTrace();
             }
 
-        }
-        public boolean should_I_proc_alive_info(String from_port){  // return true if you need to process any keys to the alive port
-            NodeInfo node = find_node_by_node_no(from_port);
-            if(my_keys.isEmpty())
-                return false;
-            else if(from_port.equals(my_node_no))
-                return false;
-            return true;
         }
         public void process_delete_server_side(String selection, String from_port, boolean isRep){
             if(selection.equals(all_node_queryall)){
@@ -786,7 +834,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         protected Void doInBackground(String... msgs) {
             String msgToSend = msgs[0];
             String toPort = msgs[1];
-            Socket socket;
+            Socket socket=null;
             toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
             PrintWriter out=null;
             BufferedReader bR=null;
@@ -823,6 +871,13 @@ public class SimpleDynamoProvider extends ContentProvider {
                 } else {
                     nodes_status.put(toPort,true);
                 }
+                if(socket !=null) {
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
             }
             return null;
         }
@@ -833,7 +888,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         protected Void doInBackground(String... msgs) {
             String msgToSend = msgs[0];
             String toPort = msgs[1];
-            Socket socket;
+            Socket socket=null;
             toPort=String.valueOf(Integer.parseInt(toPort)*port_mul_factor); // calulating actual exact port number
             PrintWriter out=null;
             BufferedReader bR=null;
@@ -863,6 +918,13 @@ public class SimpleDynamoProvider extends ContentProvider {
                     nodes_status.put(toPort,false);
                 } else {
                     nodes_status.put(toPort,true);
+                }
+                if(socket !=null) {
+                    try {
+                        socket.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
             return null;
