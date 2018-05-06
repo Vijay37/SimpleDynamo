@@ -268,9 +268,17 @@ public class SimpleDynamoProvider extends ContentProvider {
                     if(read_failed){
                         read_failed=false;
                         query_started=true;
-                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_1());
-                        while (query_started) {
-                            global_keys.wait();
+                        if(!node.getSuc_1().equals(my_node_no)) {
+                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, forward_search_msg, node.getSuc_1());
+                            while (query_started) {
+                                global_keys.wait();
+                            }
+                        }
+                        else{
+                            value = query_my_node(selection);
+                            global_keys.add(selection);
+                            global_values.put(selection, value);
+                            query_started = false;
                         }
                     }
                     for (String key : global_keys) {
@@ -278,6 +286,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         mc.newRow().add("key", key).add("value", value.trim());
                     }
                     global_keys.clear();// resetting global_keys
+                    global_values.clear();
                 }
             }
         }catch(Exception e){
@@ -310,6 +319,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                     mc.newRow().add("key", key).add("value", value.trim());
                 }
                 global_keys.clear();// resetting global_keys
+                global_values.clear(); // resetting global_values
             }
         }catch(Exception e){
             e.printStackTrace();
@@ -794,16 +804,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                 Log.v("Query-server", "Waiting for the lock");
                 loop_until_rw_status_false();
                 Log.v("Query-server", "Obtained the lock");
-                rw_status = true;
-                synchronized (rw_mutex) {
                     String value = query_my_node(key);
-                    Log.v("Query-server", "Releasing the lock");
-                    rw_status = false;
-                    rw_mutex.notify();
                     String qu_res_msg = key_result + delimiter + key + delimiter + value;
                     Log.v("Server : ", "Replying answer for :" + key);
                     new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, qu_res_msg, to_port);
-                }
             }
 
         }
@@ -847,6 +851,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         Integer.parseInt(toPort)));
                 out = new PrintWriter(socket.getOutputStream(), true);
                 out.println(msgToSend);
+                Log.v("Query task","Message sent");
                 bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
                 message = bR.readLine();
                 if(!message.equals(server_reply)){
@@ -901,6 +906,7 @@ public class SimpleDynamoProvider extends ContentProvider {
                         Integer.parseInt(toPort)));
                 out = new PrintWriter(socket.getOutputStream(), true);
                 out.println(msgToSend);
+                Log.v("Client task","Message sent");
                 bR = new BufferedReader(new InputStreamReader(socket.getInputStream())); // Read message from the socket
                 message = bR.readLine();
                 if(!message.equals(server_reply)){
